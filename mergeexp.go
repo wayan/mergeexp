@@ -22,7 +22,7 @@ type MergeExp struct {
 	BitBucketCloneBase     string
 	BitBucketDeploymentKey string
 
-	GitlabCloneBase        string
+	GitlabCloneBase string
 	ConflictRetries int
 }
 
@@ -128,10 +128,16 @@ func (me *MergeExp) ResolveConflict(b Branch, message string) error {
 			return resolve(retry + 1)
 		} else {
 			// no conflict - do we have some staged files
-			hascached := me.Command("git", "diff", "--cached", "--exit-code", "--quiet").Run() != nil
-			if hascached {
+			// hascached := me.Command("git", "diff", "--cached", "--exit-code", "--quiet").Run() != nil
+
+			// are we inside merge ?
+			cmd := me.Command("git", "rev-parse", "-q", "--verify", "MERGE_HEAD")
+			// &>/dev/null
+			cmd.Stderr = nil
+
+			if cmd.Run() == nil {
 				newMessage := message
-				if retry > 0 {
+				if retry == 0 {
 					newMessage = newMessage + " with resolved conflict(s) using rerere"
 				}
 				return me.Command("git", "commit", "-m", newMessage).Run()
@@ -176,10 +182,10 @@ func (me *MergeExp) FinalCommit(remoteBranch *Branch) error {
 	var commitsNotIncluded string
 
 	// test if remote branch exists
-    remoteExists := me.Command("git", "show-branch", remoteBranch.Name).Run() == nil
-    if ! remoteExists {
-        return nil
-    }
+	remoteExists := me.Command("git", "show-branch", remoteBranch.Name).Run() == nil
+	if !remoteExists {
+		return nil
+	}
 	if remoteExists {
 		// remote branch exists
 		commitsNotIncluded, err = OutputString(
@@ -192,8 +198,8 @@ func (me *MergeExp) FinalCommit(remoteBranch *Branch) error {
 	}
 
 	message := fmt.Sprintf("Experimental merge")
-	if true { 
-        // OCP specific :-(
+	if true {
+		// OCP specific :-(
 		message = message + " NOTESTS"
 	}
 	message = message + "\n"
