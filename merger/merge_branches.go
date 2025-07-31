@@ -7,37 +7,29 @@ import (
 )
 
 func (m *Merger) MergeBranches(branches []MergeRef) error {
-	cnt := len(branches)
-	i := 0
-	for _, b := range branches {
-		i = i + 1
-		slog.Info(fmt.Sprintf("Merging %d of %d (%s)", i, cnt, b.Name()))
-		if err := m.MergeBranch(b); err != nil {
+	for i, b := range branches {
+		slog.Info(fmt.Sprintf("Merging %d of %d (%s)", i+1, len(branches), b.Name()))
+		if err := m.mergeBranch(b, i, len(branches)); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-func (m *Merger) MergeBranch(b MergeRef) error {
+func (m *Merger) mergeBranch(b MergeRef, i, n int) error {
 	message := fmt.Sprintf("Experimental merge of %s", b.Name())
-	err := m.dir.Command("git", "merge", "--no-ff", "--log", "-m", message, b.Sha()).Run()
-	if err != nil {
-		return m.ResolveConflict(b, message)
+	if err := m.dir.Command("git", "merge", "--no-ff", "--log", "-m", message, b.Sha()).Run(); err != nil {
+		return m.resolveConflict(b, message, 0, i, n)
 	}
 	return nil
 }
 
-func (m *Merger) ResolveConflict(b MergeRef, message string) error {
-	return m.resolveConflict(b, message, 0)
-}
-
-func (m *Merger) resolveConflict(b MergeRef, message string, retry int) error {
-	maxRetries := m.ConflictRetries
-	if maxRetries == 0 {
-		maxRetries = 4
+func (m *Merger) resolveConflict(b MergeRef, message string, retry, i, n int) error {
+	retries := m.ConflictRetries
+	if retries == 0 {
+		retries = 4
 	}
-	if retry > maxRetries {
+	if retry > retries {
 		return fmt.Errorf(fmt.Sprintf("even after %d attempts the working dir is still not clean, aborting", retry))
 	}
 
@@ -48,25 +40,18 @@ func (m *Merger) resolveConflict(b MergeRef, message string, retry int) error {
 		// lines := splitLines( output )
 
 		slog.Info(fmt.Sprintf(
-			"Conflict in %s, you have unmerged files:\n%s\nResolve conflict, commit (or just add the files) and exit the shell",
-			b.Name,
+			`Conflict in %s, you have unmerged files:
+%s
+nResolve conflict, commit (or just add the files) and exit the shell (CTRL+D)`,
+			b.Name(),
 			string(output),
 		))
 
-		retryStr := ""
-		if retry > 0 {
-			retryStr = fmt.Sprintf(" (retry %d of %d)", retry, maxRetries)
-		}
-
-		prompt := fmt.Sprintf("conflict resolution of '%s'%s $ ",
-			b.Name,
-			retryStr,
-		)
-		err := m.dir.RunBashWithPrompt(prompt)
-		if err != nil {
+		prompt := m.conflictPrompt(b, retry, i, n)
+		if err := m.dir.RunBashWithPrompt(prompt); err != nil {
 			return err
 		}
-		return m.resolveConflict(b, message, retry+1)
+		return m.resolveConflict(b, message, retry+1, i, n)
 	} else {
 		// no conflict - do we have some staged files
 		// hascached := me.Command("git", "diff", "--cached", "--exit-code", "--quiet").Run() != nil
@@ -85,4 +70,17 @@ func (m *Merger) resolveConflict(b MergeRef, message string, retry int) error {
 		}
 		return nil
 	}
+}
+
+// conflictPrompt is an informative bash prompt to be displayed on invoked bash
+func (m *Merger) conflictPrompt(b MergeRef, retry, i, n int) string {
+	name := b.Name()
+	if len(name) > 40 {
+		name = name[:37] + "..."
+	}
+	prompt := fmt.Sprintf("Merging %d of %d (%s)", i+1, n, name)
+	if retry > 0 {
+		prompt += fmt.Sprintf(" (retry %d of %d)", retry, m.ConflictRetries)
+	}
+	return prompt + "$ "
 }

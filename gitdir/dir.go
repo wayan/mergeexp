@@ -1,11 +1,12 @@
 package gitdir
 
 import (
+	"bytes"
 	"fmt"
-	"io/ioutil"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 )
 
 // Dir represents different utilities for a git working tree
@@ -47,48 +48,86 @@ func (wd *Dir) GitInit() error {
 	return err
 }
 
-func (wd *Dir) RunBashWithPrompt(prompt string) error {
-	tmpFile, err := ioutil.TempFile(os.TempDir(), "mergeex*.sh")
+// StartExperimentalBranch creates or recreates a Git branch, force-overwriting it if it already exists.
+//
+// This function performs the following actions:
+//  1. Attempts to create a new branch named 'branch' from 'target'. If 'branch' already exists, it will be
+//     forcefully overwritten (`git branch -f`).
+//  2. Checks out the newly created or existing 'branch'.
+//  3. **DANGER: Resets the working tree and the current branch to the 'target' commit, discarding any
+//     local changes in the working directory and staging area on the 'branch'.**
+//
+// Parameters:
+//
+//	branch: The name of the branch to create or recreate.
+//	target: The commit, branch, or tag from which to start the 'branch' (e.g., "main", "HEAD~1", "v1.0").
+//
+// Returns:
+//
+//	An error if any Git command fails, otherwise nil.
+func (wd *Dir) StartExperimentalBranch(branch, target string) error {
+
+	// checking the current branch first
+	currentBranch, err := wd.currentBranch()
 	if err != nil {
-		return fmt.Errorf("cannot create temporary file: %w", err)
+		return fmt.Errorf("check for current branch: %w", err)
 	}
 
-	// Remember to clean up the file afterwards
-	defer os.Remove(tmpFile.Name())
-
-	// Example writing to the file
-	text := []byte(fmt.Sprintf("PS1='%s'\n", prompt))
-	if _, err = tmpFile.Write(text); err != nil {
-		return fmt.Errorf("failed to write to temporary file: %w", err)
+	if currentBranch == branch {
+		// if on experimental branch, reset is enough, regardless current state
+		// WARNING: This is a dangerous operation.
+		// It resets the current branch (which is now 'branch') to the 'target' commit,
+		// discarding any local changes in the working directory and staging area.
+		if err := wd.Command("git", "reset", "--hard", target).Run(); err != nil {
+			return fmt.Errorf("resetting to %s: %w", branch, err)
+		}
+		return nil
 	}
 
-	// Close the file
-	if err := tmpFile.Close(); err != nil {
-		return fmt.Errorf("closing tmp file: %w", err)
+	// checking if the working tree is not in a clean state
+	out, err := wd.Command("git", "status", "--porcelain").Output()
+	if err != nil {
+		return fmt.Errorf("checking the working tree state: %w", err)
 	}
 
-	cmd := wd.Command("bash", "--init-file", tmpFile.Name())
-	cmd.Stdin = os.Stdin
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
+	if len(out) > 0 {
+		// nonempty output
+		return fmt.Errorf("working tree of %s is not in a clean state and on a branch %s different from %s, resolve it first",
+			wd.Dir, currentBranch, branch)
+	}
 
-	return cmd.Run()
+	// Forcefully create or recreate the branch from the target.
+	// This command will overwrite 'branch' if it already exists.
+	if err := wd.Command("git", "branch", "-f", branch, target).Run(); err != nil {
+		return fmt.Errorf("creating branch %s: %w", branch, err)
+	}
+
+	// Checkout the specified branch.
+	if err := wd.Command("git", "checkout", branch).Run(); err != nil {
+		return fmt.Errorf("checking out %s: %w", branch, err)
+	}
+
+	return nil
 }
 
-func (wd *Dir) StartBranch(branch, target string) error {
-	if err := wd.Command("git", "rev-parse", "--verify", branch).Run(); err != nil {
-		if err := wd.Command("git", "branch", "-f", branch, target).Run(); err != nil {
-			return err
+// currentBranch returns the name of the current branch.
+// It returns an empty string and an error if not on a branch (detached HEAD) or on error.
+func (wd *Dir) currentBranch() (string, error) {
+	cmd := wd.Command("git", "symbolic-ref", "--short", "HEAD")
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+
+	err := cmd.Run()
+	if err != nil {
+		// Check if it's a "not a symbolic ref" error, which means detached HEAD
+		if strings.Contains(stderr.String(), "not a symbolic ref") {
+			return "", nil // Not on a branch
 		}
+		return "", err // Other error
 	}
-	if err := wd.Command("git", "checkout", branch).Run(); err != nil {
-		return err
-	}
-	// dangerous
-	if err := wd.Command("git", "reset", "--hard", target).Run(); err != nil {
-		return err
-	}
-	return nil
+
+	return strings.TrimSpace(stdout.String()), nil
 }
 
 func (wd *Dir) ShaExists(sha string) bool {
